@@ -1,0 +1,192 @@
+#!/bin/bash
+STORE_VERSION=201102
+
+# globally prevent word splitting on space; too dumb
+export IFS=$'\n'
+
+BASEDIR=$(dirname $0)
+cd $BASEDIR
+BASEDIR=$(pwd -LP)
+
+iDeleteds=1
+
+
+function gc() {
+  echo GC now
+  find $BASEDIR/store/deleted -type f -print | while read toDel; do
+      links=$(stat -c %h $toDel)
+      if [ $links == "2" ] ; then 
+        size=$(stat -c %s $toDel)
+        size00=00$size
+        size00=${size00: -2}
+        f4kmd5=$(head -c4096 $toDel | md5sum | (IFS=' ' read s f && echo $s))
+        start=$BASEDIR/store/data/size/$size00/$size/4kmd5/${f4kmd5: -2}/$f4kmd5 
+        [ -d $start ] || start=$BASEDIR/store/data/size/$size00/$size
+        find $start -samefile $toDel -print
+      fi
+      rm $toDel
+  done | while read dataToDel; do
+    echo removing unreferred $dataToDel
+    rm $dataToDel
+    rmdir -p $(dirname $dataToDel) 2>/dev/null
+  done
+  
+  # #cleaning GC queue (useless)
+  # find $BASEDIR/store/deleted -type f -delete
+
+  #~ echo cleaning store from empty dirs (useless now)
+  #~ cd $BASEDIR/store/data/size
+  #~ for d in $(ls -1 | sort -n) ; do
+    #~ echo $d ...
+    #~ find $d -type d -empty -delete
+  #~ done
+  
+  echo GC end.
+}
+
+function removeDirectoryFromStore() {
+   echo $1 directory removed
+   find $1 -type f -print | while read toDel; do
+      mv $toDel $BASEDIR/store/deleted/$$.$iDeleteds
+      let iDeleteds++
+   done
+
+   rm -r $1
+}
+
+function removeFileFromStore() {
+   echo $1 file removed
+   mv $1 $BASEDIR/store/deleted/$$.$iDeleteds
+   let iDeleteds++
+}
+
+
+function doln() {
+   mkdir -p $(dirname $2)
+   if [ -d $2 ]; then
+      removeDirectoryFromStore $2
+      
+   elif [ -e $2 ]; then
+      
+      # test if the data file is already linked here
+      test=$(find $2 -samefile $1)
+      [ -n $test ] && echo $1 already linked as $2 && return
+      
+      removeFileFromStore $2
+   fi
+   
+   echo linking $1 to $2
+   ln -f $1 $2
+}
+
+function createDirs() {
+   echo Creating a deduping system in $BASEDIR
+   cd $BASEDIR
+   mkdir -p \
+      in-out/.unionfs \
+      store/tree \
+      store/data \
+      store/deleted \
+      union
+
+   # create a magic file
+   touch store/tree/.backunion-tree
+}
+
+function mountUnion() {
+   [ -e $BASEDIR/union/.backunion-tree ] && \
+      echo union already mounted. && return ; # already mounted
+   echo mounting $BASEDIR/union
+   unionfs-fuse -o cow -o allow_other \
+      $BASEDIR/in-out=RW:$BASEDIR/store/tree=RO $BASEDIR/union
+}
+
+function flushInOut() {
+   cd $BASEDIR/in-out
+    
+   echo whiteouts propagating now
+   [ -d .unionfs ] && find .unionfs -name '*_HIDDEN~' -print | while read f; do
+      r=${f%_HIDDEN~}
+      r=${r#.unionfs/}
+      r=$BASEDIR/store/tree/$r
+      
+      if [ -d $f -a -d $r ]; then
+         removeDirectoryFromStore $r
+      elif [ -f $f -a -f $f ]; then
+         removeFileFromStore $r
+      else
+         echo inconsistent whiteout $f 
+      fi
+      echo removing $f
+      rm -r $f
+   done
+   echo whiteouts propagating end.
+  
+   echo deduping now
+   find . -name .unionfs -prune -o -type f -print | while read f; do
+      size=$(stat -c %s $f)
+      size00=00$size
+      size00=${size00: -2}
+      t=$BASEDIR/store/data/size/$size00/$size
+      mkdir -p $t
+      
+      if [ -f $t/content ]; then
+          content4kmd5=$(head -c4096 $t/content | md5sum | (IFS=' ' read s f && echo $s))
+          mkdir -p $t/4kmd5/${content4kmd5: -2}/$content4kmd5
+          mv $t/content $t/4kmd5/${content4kmd5: -2}/$content4kmd5/content
+      fi
+
+      if [ -d $t/4kmd5 ]; then
+         f4kmd5=$(head -c4096 $f | md5sum | (IFS=' ' read s f && echo $s)) 
+         t=$t/4kmd5/${f4kmd5: -2}/$f4kmd5
+         mkdir -p $t
+
+         if [ -f $t/content ]; then
+             contentSha256sum=$(sha256sum $t/content | (IFS=' ' read s f && echo $s)) 
+             mkdir -p $t/sha256sum/$contentSha256sum
+             mv $t/content $t/sha256sum/$contentSha256sum/content
+         fi
+
+         if [ -d $t/sha256sum ]; then
+             fSha256sum=$(sha256sum $f | (IFS=' ' read s f && echo $s)) 
+             t=$t/sha256sum/$fSha256sum
+             mkdir -p $t
+         fi
+      fi
+      if [ -f $t/content ]; then
+         echo dup hit: $t/content
+      else
+         echo linking $f to $t/content
+         ln $f $t/content
+      fi
+
+      doln $t/content $BASEDIR/store/tree/$f
+      rm $f
+
+   done
+   # marker file to perform inotify-watch triggered union remount
+   date > $BASEDIR/store/last-dedup
+   echo deduping end.
+}
+
+function checkStore() {
+   if [ -f $BASEDIR/store/version ] ; then
+      if [ $(cat $BASEDIR/store/version) != $STORE_VERSION ]; then
+         echo FAILURE bad version store
+         echo Update your store. I Won\'t tell how.
+         exit 1
+      fi
+   else
+      echo $STORE_VERSION > $BASEDIR/store/version
+   fi
+}
+
+function backunion() {
+   createDirs
+   checkStore
+   mountUnion
+   flushInOut
+   gc
+}
+
+backunion
