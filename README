@@ -1,0 +1,160 @@
+INTRODUCTION
+
+There are many technologies related to file deduping: filesystems like
+btrfs, lessfs, s3ql or version managers like git. But none of them
+looks as simple and yet as versatile as "backunion".
+
+SIMPLE AND VERSATILE
+
+"backunion" relays on an union mount. If you understand what an union
+mount does, you will understand how "backunion" works. It simply dedups
+files from the writable branch to the lower branch of a classic 2 layers
+union: "in-out=RW:store/tree=RO".
+
+"backunion" only weights ~200 instructions and combines well known
+command-line tools like "find", "md5sum" and "ln".  It doesn't even need
+for a database.
+
+And yet "backunion" allows to backup many clients on a single
+server by performing asynchronous global deduping on both client and
+server sides.
+
+  * one may run "backunion" at server side and share the union mount
+    via regular file protocols suitable for closed or thin clients.
+
+  * one may run "backunion" on each client so to deduplicate files up
+    to a central shared "store" folder (hard-link support is the
+    minimal requirement for such a server).
+
+  * Client side deduping -for open and powerful devices- and server
+    side deduping can be performed simultaneously (n clients + 1 server)
+    on the same "store" folder.
+
+  * Transparent. The end user may access and modify deduped files
+    without side effect thanks to the copy-on-write feature of union
+    mounts.
+
+  * And even more: Postponable deduping, 2d level backup/sync aware, ...
+
+WHAT IS GLOBAL CLIENT SIDE DEDUPING?
+
+rsync is know to be the ideal file backup/synchronisation tool. And yet
+it will send again a whole file every time it is renamed or moved
+into an other folder. Renaming a folder will even lead to recursivly
+upload all its content.
+
+Installing a deduping filesystem like lessfs, btrfs or ZFS to your
+server won't change anything to this issue. Files are eventually
+deduplicated but redondant uploading will still occur.
+
+Client-side deduping consists in hashing files so to identify and avoid
+such useless uploads. Global deduping will even avoid uploading a file
+which has been already saved by another client whatever its former name.
+
+s3ql is a typical example of this client-side deduping
+approach. However, a given s3ql backend can't be mounted several times.
+Only one machine at a time can browse the s3ql store. s3ql data
+are so opaque to the server it can't even publish back deduped files via
+standard protocols like CIFS, FTP, DAAP or DLNA.
+
+"git" as a deduped file storage may work well, but its major drawback is
+that files are copied twice on each client because of git local file
+changes tracing feature.
+
+HOW TO USE "BACKUNION"?
+
+"backunion" is simply designed. No parameters. No surprise. If you
+want customisation, well edit the code.
+
+How to use "backunion" on a single machine?
+
+1) put the script into a backup folder and run it once.
+   ==> 3 subfolders "./in-out", "./store" and "./union" are created.
+   ==> An union filesystem is mounted to "./union" and merges "./in-out"
+   with "./store/tree".
+   
+2) Fill up "./union" with your files.
+   ==> Your data are actually stored in "./in-out".
+
+3) Run the script again and Voilà! all your files were deduped to
+   "./store/data" and hard-linked into "./store/tree".
+   ==> the union mount is still up and ready. It offers a consistent
+   writable files tree.
+
+*) You can change files within the union mount and run "backunion"
+   again to deduplicate these changes. It will work as expected:
+   A change won't be propagated to all instances of a deduped file.
+
+How to share a "backunion" deduping folder?
+
+Run "backunion" at least once and share the obtained "./union" folder
+via any suited file protocol (eg. CIFS). Run "backunion" again to
+deduplicate uploaded client files. This process can be postponed to low
+activity periods.
+
+How to allow client-side deduping?
+
+To allow bandwith-efficient client-side deduping, share the "./store"
+folder obtained by a previous invocation of "backunion" via a file
+protocol allowing hard links (eg. NFS).
+
+Then simply mount the shared folder on each client in place of the
+default "./store" folder. That's all. Running "backunion" on a client
+performs file deduping on client side and upload only new files to the
+store.
+
+SO, HOW DOES BACKUNION WORKS?
+  
+"backunion" relays on an union mount merging an "in-out" writable folder
+on top of a "store/tree" read-only folder. It leverages on the
+"copy-on-write" feature (aka "copy-up") of union mounts.
+
+Note there is several union mount implementation on Linux. At the moment
+writing, "backunion" relays on unionfs-fuse (hard-coded).
+
+"backunion" eliminates duplicates by:
+- moving all files from the "in-out" folder to "store/data"
+  by renaming them according to their own checksums.
+- postponing costly crypto checksums as long as possible (à la FSlint).
+- hard-linking renamed files to their cloned locations within
+  the "store/tree" folder.
+
+"backunion" is as simple as possible but not too much! It still manages
+file deletion ("whiteouts" translated into link removals), garbage
+collecting and tricky updates (eg. when a single file takes place of a
+full folder).
+
+BENEFITS OF THE UNION MOUNT IDEA
+The union mount merges "in-out" and "store/tree" folders together, so
+the deduping process can be proceed in background while being
+transparent to the end user.
+
+The union mount performs "copy on write" when needed so the end user
+may still modify deduped files without messing the store (typical
+unwanted effects of hard-link deduping).
+
+Plus the "copy up" behavior separates modified files from the unmodified
+deduped files in the read-only branch so that invoking the script again
+will only dedup touched files.
+
+Please note that directly messing with branches of an union
+mount is known to be risky. However "backunion" does it in such a way
+that all is OK (but be careful with race conditions listed hereafter).
+
+PENDING ISSUES AND ROOM FOR FUTURE IMPROVEMENTS
+
+Not (yet) adressed race conditions:
+- I guess moving a write-opened file from "in-out" to "store"
+may lead to hash inconsistency.
+- Concurrent deduping may lead to compute an hashcode before the
+corresponding file been fully uploaded, only because of the
+hash computation postponing optimisation.
+- Garbage collecting may remove a file freshly put by a parallel
+deduping process.
+
+Envisaged workarounds:
+- Remounting the union mount read-only while deduping.
+- Disable hash computation postponing optimisation to allow
+  concurrent deduping.
+- Or queueing clients via a global "lock" as a file marker.
+- Finer "locks" (per file size) envisageable.
