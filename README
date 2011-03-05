@@ -103,7 +103,7 @@ default "./store" folder. That's all. Running "backunion" on a client
 performs file deduping on client side and upload only new files to the
 store.
 
-SO, HOW DOES BACKUNION WORKS?
+SO, HOW DOES BACKUNION WORK?
   
 "backunion" relays on an union mount merging an "in-out" writable folder
 on top of a "store/tree" read-only folder. It leverages on the
@@ -119,10 +119,18 @@ writing, "backunion" relays on unionfs-fuse (hard-coded).
 - hard-linking renamed files to their cloned locations within
   the "store/tree" folder.
 
-"backunion" is as simple as possible but not too much! It still manages
-file deletion ("whiteouts" translated into link removals), garbage
-collecting and tricky updates (eg. when a single file takes place of a
-full folder).
+"backunion" is as simple as possible but not too much as it manages:
+* file deletion ("whiteouts" translated into link removals)
+* garbage collector (unreferred data removed from the store)
+* tricky updates (eg. when a single file takes place of a full folder)
+* opened files (not deduped)
+* concurrent deduping processes/clients thanks to (fine enough) locks
+
+"backunion" won't manage:
+* 2 deduping process within the same client. Should not be. Period.
+* when clients conflict about a file named like a folder.
+* dedup miss because of a concurrent GC wrongly removing a content
+  from the store. Not critical.
 
 BENEFITS OF THE UNION MOUNT IDEA
 The union mount merges "in-out" and "store/tree" folders together, so
@@ -143,18 +151,11 @@ that all is OK (but be careful with race conditions listed hereafter).
 
 PENDING ISSUES AND ROOM FOR FUTURE IMPROVEMENTS
 
-Not (yet) adressed race conditions:
-- I guess moving a write-opened file from "in-out" to "store"
-may lead to hash inconsistency.
-- Concurrent deduping may lead to compute an hashcode before the
-corresponding file been fully uploaded, only because of the
-hash computation postponing optimisation.
-- Garbage collecting may remove a file freshly put by a parallel
-deduping process.
+The GC may remove a file put by a concurrent client. It only leads to
+a dedup miss. Not critical.
 
-Envisaged workarounds:
-- Remounting the union mount read-only while deduping.
-- Disable hash computation postponing optimisation to allow
-  concurrent deduping.
-- Or queueing clients via a global "lock" as a file marker.
-- Finer "locks" (per file size) envisageable.
+2 deduping clients could conflict because one puts a file in place where
+the other puts a folder. I'm still thinking about the most simple way to
+handle this.
+
+Don't launch 2 processes deduping the same in-out.
