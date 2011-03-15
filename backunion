@@ -1,6 +1,8 @@
-#!/bin/bash
+# !/bin/sh
 # backunion: a KISS deduplication system
 
+UNIONFS=unionfs-fuse
+#UNIONFS=unionfs
 
 export IFS=$'\n'
 
@@ -9,7 +11,7 @@ MINDEDUPSIZE=4096
 BASEDIR=$(dirname $0)
 
 if [ -n "$DEBUG" ]; then
- MINDEDUPSIZE=5
+  MINDEDUPSIZE=5
 fi
 
 cd $BASEDIR
@@ -18,215 +20,213 @@ BASEDIR=$(pwd -LP)
 iDeleteds=1
 locked=
 
-function lock() {
-   [ "$locked" == $1 ] && return
-   [ -n "$locked" ] && echo error: who messes with my code\? && exit 1
-   
-   local p=1
-   while ! mkdir $1/lock; do
-      echo info: can\'t lock $1, waiting ${p}s
-      sleep $p
-      p++
-   done
-   locked=$1
+lock() {
+  [ "$locked" == $1 ] && return
+  [ -n "$locked" ] && echo error: who messes with my code\? && exit 1
+  
+  local p=1
+  while ! mkdir $1/lock; do
+     echo info: can\'t lock $1, waiting ${p}s
+     sleep $p
+     p++
+  done
+  locked=$1
 }
 
-function unlock {
-   [ -n "$locked" ] && rmdir $locked/lock
-   locked=
+unlock() {
+  [ -n "$locked" ] && rmdir $locked/lock
+  locked=
 }
 
-function gc() {
+gc() {
   echo running GC
   cd $BASEDIR
   find store/deleted -type f -print | while read toDel; do
-      links=$(stat -c %h $toDel)
-      if [ $links == 2 ] ; then
-        size=$(stat -c %s $toDel)
-        size00=0$size
-        size00=${size00: -2}
-        f4kmd5=$(head -c4096 $toDel | md5sum | (IFS=' ' read s f && echo $s))
-        start=store/data/size/$size00/$size/4kmd5/${f4kmd5: -2}/$f4kmd5 
-        [ -d $start ] || start=store/data/size/$size00/$size
-        
-        dataToDel=$(find $start -samefile $toDel -print)
-        
-        echo removing unreferred $dataToDel
-        rm $dataToDel
-        rmdir -p $(dirname $dataToDel) 2>/dev/null
-      fi
-      rm $toDel
-      done
+     links=$(stat -c %h $toDel)
+     if [ $links == 2 ] ; then
+       size=$(stat -c %s $toDel)
+       size00=$(printf '%02d' $(expr $size % 100))
+       f4kmd5=$(head -c4096 $toDel | md5sum | (IFS=' ' read s f && echo $s))
+       start=store/data/size/$size00/$size/4kmd5/${f4kmd5#${f4kmd5%??}}/$f4kmd5
+       [ -d $start ] || start=store/data/size/$size00/$size
+       
+       dataToDel=$(find $start -samefile $toDel -print)
+       
+       echo removing unreferred $dataToDel
+       rm $dataToDel
+       rmdir -p $(dirname $dataToDel) 2>/dev/null
+     fi
+     rm $toDel
+  done
 }
 
-function removeDirectoryFromStore() {
-   echo removing $1/ from store/tree/
-   mv $BASEDIR/store/tree/$1 $BASEDIR/store/deleted/$$.$iDeleteds
-   let iDeleteds++
+removeDirectoryFromStore() {
+  echo removing $1/ from store/tree/
+  mv $BASEDIR/store/tree/$1 $BASEDIR/store/deleted/$$.$iDeleteds
+  let iDeleteds++
 }
 
-function removeFileFromStore() {
-   echo removing $1 from store/tree/
-   mv $BASEDIR/store/tree/$1 $BASEDIR/store/deleted/$$.$iDeleteds
-   let iDeleteds++
+removeFileFromStore() {
+  echo removing $1 from store/tree/
+  mv $BASEDIR/store/tree/$1 $BASEDIR/store/deleted/$$.$iDeleteds
+  let iDeleteds++
 }
 
-function createDirs() {
-   echo building a backunion skeleton in $BASEDIR/
-   cd $BASEDIR
-   mkdir -p \
-      in-out/.unionfs \
-      store/tree \
-      store/data \
-      store/deleted \
-      union
+createDirs() {
+  echo building a backunion skeleton in $BASEDIR/
+  cd $BASEDIR
+  mkdir -p \
+     in-out/.unionfs \
+     store/tree \
+     store/data \
+     store/deleted \
+     union
 
-   # create a magic file
-   touch store/tree/.backunion-tree
+  # create a magic file
+  touch store/tree/.backunion-tree
 }
 
-function unmountUnion() {
-   UNMOUNTED=OK
-   cd $BASEDIR
-   [ -e union/.backunion-tree ] \
-      || { echo info: union/ not mounted && return ; }
+unmountUnion() {
+  UNMOUNTED=OK
+  cd $BASEDIR
+  [ -e union/.backunion-tree ] \
+     || { echo info: union/ not mounted && return ; }
 
-   echo unmounting union/ for safer deduplication
-   fusermount -u $BASEDIR/union && return
-   echo unmounting failed
-   UNMOUNTED=
+  echo unmounting union/ for safer deduplication
+  fusermount -u $BASEDIR/union && return
+  echo unmounting failed
+  UNMOUNTED=
 }
 
-function mountUnion() {
-   cd $BASEDIR
-   [ -e union/.backunion-tree ] \
-      && { echo info: union/ already mounted && return ; }
+mountUnion() {
+  cd $BASEDIR
+  [ -e union/.backunion-tree ] \
+     && { echo info: union/ already mounted && return ; }
 
-   echo mounting union/
-   unionfs-fuse -o cow -o allow_other \
-      $BASEDIR/in-out=RW:$BASEDIR/store/tree=RO $BASEDIR/union
+  echo mounting union/
+  $UNIONFS -o cow -o allow_other \
+     $BASEDIR/in-out=RW:$BASEDIR/store/tree=RO $BASEDIR/union
 }
 
-function flushInOut() {
-   echo flushing in-out/
-   cd $BASEDIR/in-out
-    
-   echo processing whiteouts
-   [ -d .unionfs ] && find .unionfs -name '*_HIDDEN~' -print | while read f; do
-      r=${f%_HIDDEN~}
-      r=${r#.unionfs/}
-      r=$BASEDIR/store/tree/$r
-      
-      if [ -d $f -a -d $r ]; then
-         removeDirectoryFromStore $f
-      elif [ -f $f -a -f $r ]; then
-         removeFileFromStore $f
-      else
-         echo info: inconsistent whiteout $f 
-      fi
-      echo removing $f
-      rm -r $f
-   done
-  
-   echo copying empty directories
-   find . -name .unionfs -prune -o -type d -empty -print | while read d; do
-      if [ -d $BASEDIR/store/tree/$d ] ; then continue ; fi
-      echo making store/tree/$d/
-      mkdir -p $BASEDIR/store/tree/$d
-      # hum don't preserve attributes : bad
-   done
+flushInOut() {
+  echo flushing in-out/
+  cd $BASEDIR/in-out
+   
+  echo processing whiteouts
+  [ -d .unionfs ] && find .unionfs -name '*_HIDDEN~' -print | while read f; do
+     r=${f%_HIDDEN~}
+     r=${r#.unionfs/}
+     
+     if [ -d $f -a -d $BASEDIR/store/tree/$r ]; then
+        removeDirectoryFromStore $r
+     elif [ -f $f -a -f $BASEDIR/store/tree/$r ]; then
+        removeFileFromStore $r
+     else
+        echo info: inconsistent whiteout $f
+     fi
+     echo removing $f
+     rm -r $f
+  done
+ 
+  echo copying empty directories
+  find . -name .unionfs -prune -o -type d -empty -print | while read d; do
+     if [ -d $BASEDIR/store/tree/$d ] ; then continue ; fi
+     echo making store/tree/$d/
+     mkdir -p $BASEDIR/store/tree/$d
+     # hum don't preserve attributes : bad
+  done
 
-   echo deduping files
-   find . -name .unionfs -prune -o -type f -print | while read f; do
-      # Opened file can't be deduped via hard linking
-      if [ -z "$UNMOUNTED" ]; then
-          if [ -n "$(fuser $f 2>/dev/null)" ]; then
-            echo info $f opened, not deduped
-            continue
-          fi
-      fi
-      
-      if [ -f $BASEDIR/store/tree/$f ]; then
-         removeFileFromStore $f
-      fi
-      
-      echo moving $f from in-out/ to store/tree/
-      mkdir -p $(dirname $BASEDIR/store/tree/$f)       
-      mv $f $BASEDIR/store/tree/$f
-      f=$BASEDIR/store/tree/$f
-
-      size=$(stat -c %s $f)
-      [ $size -lt $MINDEDUPSIZE ] && echo info: small file && continue;
-      
-      # Now deduping      
-      size00=0$size
-      size00=${size00: -2}
-      t=$BASEDIR/store/data/size/$size00/$size
-      mkdir -p $t
-
-      lock $t
-      
-      if [ -f $t/content ]; then
-          content4kmd5=$(head -c4096 $t/content | md5sum | (IFS=' ' read s f && echo $s))
-          mkdir -p $t/4kmd5/${content4kmd5: -2}/$content4kmd5
-          mv $t/content $t/4kmd5/${content4kmd5: -2}/$content4kmd5/content
-      fi
-
-      if [ -d $t/4kmd5 ]; then
-         f4kmd5=$(head -c4096 $f | md5sum | (IFS=' ' read s f && echo $s)) 
-         t=$t/4kmd5/${f4kmd5: -2}/$f4kmd5
-         mkdir -p $t
-
-         if [ -f $t/content ]; then
-             contentSha256sum=$(sha256sum $t/content | (IFS=' ' read s f && echo $s)) 
-             mkdir -p $t/sha256sum/$contentSha256sum
-             mv $t/content $t/sha256sum/$contentSha256sum/content
+  echo deduping files
+  find . -name .unionfs -prune -o -type f -print | while read f; do
+     # Opened file can't be deduped via hard linking
+     if [ -z "$UNMOUNTED" ]; then
+         if [ -n "$(fuser $f 2>/dev/null)" ]; then
+           echo info $f opened, not deduped
+           continue
          fi
+     fi
+     
+     if [ -f $BASEDIR/store/tree/$f ]; then
+        removeFileFromStore $f
+     fi
+     
+     echo moving $f from in-out/ to store/tree/
+     mkdir -p $(dirname $BASEDIR/store/tree/$f)       
+     mv $f $BASEDIR/store/tree/$f
+     f=$BASEDIR/store/tree/$f
 
-         if [ -d $t/sha256sum ]; then
-             fSha256sum=$(sha256sum $f | (IFS=' ' read s f && echo $s)) 
-             t=$t/sha256sum/$fSha256sum
-             mkdir -p $t
-         fi
-      fi
-      
-      if [ -f $t/content ]; then
-         echo info: $f is a dup
-         echo linking $t/content to $f
-         ln -f $t/content $f || echo warning: $f couldn\'t be deduped.
-      else
-         echo linking $f to $t/content
-         ln $f $t/content
-      fi
+     size=$(stat -c %s $f)
+     [ $size -lt $MINDEDUPSIZE ] && echo info: small file && continue;
+     
+     # Now deduping      
+     size00=$(printf '%02d' $(expr $size % 100))
+     t=$BASEDIR/store/data/size/$size00/$size
+     mkdir -p $t
 
-      unlock
-   done
-   # marker file to perform inotify-watch triggered union remount
-   date > $BASEDIR/store/last-dedup
+     lock $t
+     
+     if [ -f $t/content ]; then
+         content4kmd5=$(head -c4096 $t/content | md5sum | (IFS=' ' read s f && echo $s))
+         mkdir -p $t/4kmd5/${content4kmd5#${content4kmd5%??}}/$content4kmd5
+         mv $t/content $t/4kmd5/${content4kmd5#${content4kmd5%??}}/$content4kmd5/content
+     fi
+
+     if [ -d $t/4kmd5 ]; then
+        f4kmd5=$(head -c4096 $f | md5sum | (IFS=' ' read s f && echo $s))
+        t=$t/4kmd5/${f4kmd5#${f4kmd5%??}}/$f4kmd5
+        mkdir -p $t
+
+        if [ -f $t/content ]; then
+            contentSha256sum=$(sha256sum $t/content | (IFS=' ' read s f && echo $s))
+            mkdir -p $t/sha256sum/$contentSha256sum
+            mv $t/content $t/sha256sum/$contentSha256sum/content
+        fi
+
+        if [ -d $t/sha256sum ]; then
+            fSha256sum=$(sha256sum $f | (IFS=' ' read s f && echo $s))
+            t=$t/sha256sum/$fSha256sum
+            mkdir -p $t
+        fi
+     fi
+     
+     if [ -f $t/content ]; then
+        echo info: $f is a dup
+        echo linking $t/content to $f
+        ln -f $t/content $f || echo warning: $f couldn\'t be deduped.
+     else
+        echo linking $f to $t/content
+        ln $f $t/content
+     fi
+
+     unlock
+  done
+  # marker file to perform inotify-watch triggered union remount
+  date > $BASEDIR/store/last-dedup
 }
 
-function checkStore() {
-   cd $BASEDIR
-   if [ -f store/version ] ; then
-      if [ $(cat store/version) != $STORE_VERSION ]; then
-         echo error: bad version store
-         echo info: the store might be converted. I Won\'t tell how.
-         echo aborting
-         exit 1
-      fi
-   else
-      echo $STORE_VERSION > store/version
-   fi
+checkStore() {
+  cd $BASEDIR
+  if [ -f store/version ] ; then
+     if [ $(cat store/version) != $STORE_VERSION ]; then
+        echo error: bad version store
+        echo info: the store might be converted. I Won\'t tell how.
+        echo aborting
+        exit 1
+     fi
+  else
+     echo $STORE_VERSION > store/version
+  fi
 }
 
-function backunion() {
-   createDirs
-   checkStore
-   unmountUnion
-   flushInOut
-   gc
-   mountUnion
-   echo all done.
+backunion() {
+  createDirs
+  checkStore
+  unmountUnion
+  flushInOut
+  gc
+  mountUnion
+  echo all done.
 }
 
 backunion
+
